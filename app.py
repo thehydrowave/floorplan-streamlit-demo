@@ -85,7 +85,8 @@ def clean_mask(mask: np.ndarray, min_area: int, close_k: int) -> np.ndarray:
 def get_client(api_url: str, api_key: str):
     return InferenceHTTPClient(api_url=api_url, api_key=api_key)
 
-dir class Params:
+@dataclass
+class Params:
     model_id: str = DEFAULT_MODEL_ID
     pass1_tile: int = 2048
     pass1_over: int = 512
@@ -97,6 +98,7 @@ dir class Params:
     clean_close_k_win: int = 5
     min_area_door_px: int = 6
     min_area_win_px: int = 15
+
 
 def infer_pass(
     client: InferenceHTTPClient,
