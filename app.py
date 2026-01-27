@@ -336,7 +336,12 @@ if file is not None:
     base_rgb = np.array(img_pil)
 
     with left:
-        st.image(img_pil, caption=f"Input • {img_pil.size[0]}×{img_pil.size[1]} px", use_container_width=True)
+        st.image(
+        base_rgb,
+        caption=f"Input • {base_rgb.shape[1]}×{base_rgb.shape[0]} px",
+        use_container_width=True
+        )
+
 
     colA, colB = st.columns([1, 1])
     run = colA.button("🚀 Analyze", use_container_width=True)
