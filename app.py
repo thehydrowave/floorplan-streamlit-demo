@@ -1,6 +1,6 @@
-import os, io, json, math, time, tempfile
+import os, io, tempfile
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ import streamlit as st
 
 try:
     from inference_sdk import InferenceHTTPClient
-except Exception as e:
+except Exception:
     InferenceHTTPClient = None
 
 # ---------------------------
@@ -40,23 +40,23 @@ st.write("")
 # ---------------------------
 # CONFIG
 # ---------------------------
-DEFAULT_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "cubicasa5k-2-qpmsa/6")
+DEFAULT_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "cubicasa5k-2-qpmsa/6").strip()
 API_KEY = os.getenv("ROBOFLOW_API_KEY", "").strip()
-API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com")
+API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com").strip()
 
 if InferenceHTTPClient is None:
     st.error("Le package `inference-sdk` n'est pas installé. Vérifie requirements.txt.")
     st.stop()
 
 if not API_KEY:
-    st.warning("⚠️ ROBOFLOW_API_KEY n'est pas défini. Ajoute-le en variable d’environnement avant de lancer l’app.")
+    st.warning("⚠️ ROBOFLOW_API_KEY n'est pas défini. Ajoute-le dans Streamlit Cloud → Settings → Secrets, puis reboot.")
     st.stop()
 
 # ---------------------------
 # HELPERS
 # ---------------------------
 def clamp_box(x1, y1, x2, y2, W, H):
-    return max(0, x1), max(0, y1), min(W-1, x2), min(H-1, y2)
+    return max(0, x1), max(0, y1), min(W - 1, x2), min(H - 1, y2)
 
 def is_normalized_coords(vals: np.ndarray) -> bool:
     return float(np.max(vals)) <= 1.5
@@ -72,7 +72,7 @@ def iter_tiles(W, H, tile, overlap):
             yield x0, y0, min(W, x0 + tile), min(H, y0 + tile)
 
 def clean_mask(mask: np.ndarray, min_area: int, close_k: int) -> np.ndarray:
-    k = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k))
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (int(close_k), int(close_k)))
     m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=1)
     num, lab, stats, _ = cv2.connectedComponentsWithStats((m > 0).astype(np.uint8), 8)
     out = np.zeros_like(mask)
@@ -82,11 +82,10 @@ def clean_mask(mask: np.ndarray, min_area: int, close_k: int) -> np.ndarray:
     return out
 
 @st.cache_resource
-def get_client():
-    return InferenceHTTPClient(api_url=API_URL, api_key=API_KEY)
+def get_client(api_url: str, api_key: str):
+    return InferenceHTTPClient(api_url=api_url, api_key=api_key)
 
-@dataclass
-class Params:
+dir class Params:
     model_id: str = DEFAULT_MODEL_ID
     pass1_tile: int = 2048
     pass1_over: int = 512
@@ -101,12 +100,13 @@ class Params:
 
 def infer_pass(
     client: InferenceHTTPClient,
+    model_id: str,
     img_pil: Image.Image,
     tile_size: int,
     overlap: int,
     write_rooms: bool,
     conf_min_door: float,
-    conf_min_win: float
+    conf_min_win: float,
 ):
     W, H = img_pil.size
     rooms_index = np.zeros((H, W), np.int32) if write_rooms else None
@@ -136,7 +136,9 @@ def infer_pass(
             tile_path = os.path.join(td, f"tile_{tile_size}_{x0}_{y0}.png")
             tile.save(tile_path)
 
-            res = client.infer(tile_path, model_id=DEFAULT_MODEL_ID)
+            # ✅ IMPORTANT: utiliser model_id choisi
+            res = client.infer(tile_path, model_id=model_id)
+
             preds = res.get("predictions", []) or res.get("data", [])
             if isinstance(preds, dict) and "predictions" in preds:
                 preds = preds["predictions"]
@@ -159,15 +161,17 @@ def infer_pass(
                 if "points" in p and isinstance(p["points"], list) and len(p["points"]) >= 3:
                     pts = np.array([[float(x), float(y)] for x, y in p["points"]], dtype=np.float32)
                     if is_normalized_coords(pts):
-                        pts[:, 0] *= tw; pts[:, 1] *= th
+                        pts[:, 0] *= tw
+                        pts[:, 1] *= th
                     pts[:, 0] = np.clip(pts[:, 0], 0, tw - 1)
                     pts[:, 1] = np.clip(pts[:, 1], 0, th - 1)
-                    pts[:, 0] += x0; pts[:, 1] += y0
+                    pts[:, 0] += x0
+                    pts[:, 1] += y0
                     poly = pts.astype(np.int32)
 
-                    xmn, ymn = float(poly[:,0].min()), float(poly[:,1].min())
-                    xmx, ymx = float(poly[:,0].max()), float(poly[:,1].max())
-                    cxc, cyc = (xmn+xmx)/2, (ymn+ymx)/2
+                    xmn, ymn = float(poly[:, 0].min()), float(poly[:, 1].min())
+                    xmx, ymx = float(poly[:, 0].max()), float(poly[:, 1].max())
+                    cxc, cyc = (xmn + xmx) / 2, (ymn + ymx) / 2
 
                     if is_door:
                         cv2.fillPoly(m_doors, [poly], 255); kept_doors += 1
@@ -179,7 +183,7 @@ def infer_pass(
                     rows.append({
                         "label": lbl, "type": "polygon",
                         "x_px": cxc, "y_px": cyc,
-                        "width_px": (xmx-xmn), "height_px": (ymx-ymn),
+                        "width_px": (xmx - xmn), "height_px": (ymx - ymn),
                         "confidence": conf, "pass_tile": tile_size
                     })
 
@@ -190,32 +194,33 @@ def infer_pass(
                     if max(cx, cy, bw, bh) <= 1.5:
                         cx *= tw; cy *= th; bw *= tw; bh *= th
 
-                    x1t = int(cx - bw/2); y1t = int(cy - bh/2)
-                    x2t = int(cx + bw/2); y2t = int(cy + bh/2)
+                    x1t = int(cx - bw / 2); y1t = int(cy - bh / 2)
+                    x2t = int(cx + bw / 2); y2t = int(cy + bh / 2)
                     x1t, y1t, x2t, y2t = clamp_box(x1t, y1t, x2t, y2t, tw, th)
 
                     x1g, y1g = x1t + x0, y1t + y0
                     x2g, y2g = x2t + x0, y2t + y0
                     x1g, y1g, x2g, y2g = clamp_box(x1g, y1g, x2g, y2g, W, H)
 
-                    cxc, cyc = (x1g+x2g)/2, (y1g+y2g)/2
+                    cxc, cyc = (x1g + x2g) / 2, (y1g + y2g) / 2
 
                     if is_door:
-                        cv2.rectangle(m_doors, (x1g,y1g), (x2g,y2g), 255, -1); kept_doors += 1
+                        cv2.rectangle(m_doors, (x1g, y1g), (x2g, y2g), 255, -1); kept_doors += 1
                     elif is_win:
-                        cv2.rectangle(m_wins,  (x1g,y1g), (x2g,y2g), 255, -1); kept_wins += 1
+                        cv2.rectangle(m_wins,  (x1g, y1g), (x2g, y2g), 255, -1); kept_wins += 1
                     elif write_rooms and rooms_index is not None:
-                        cv2.rectangle(rooms_index, (x1g,y1g), (x2g,y2g), rid_for(lbl), -1)
+                        cv2.rectangle(rooms_index, (x1g, y1g), (x2g, y2g), rid_for(lbl), -1)
 
                     rows.append({
                         "label": lbl, "type": "bbox",
                         "x_px": cxc, "y_px": cyc,
-                        "width_px": (x2g-x1g), "height_px": (y2g-y1g),
+                        "width_px": (x2g - x1g), "height_px": (y2g - y1g),
                         "confidence": conf, "pass_tile": tile_size
                     })
 
     stats = dict(tile_size=tile_size, overlap=overlap, tiles=tiles, preds=preds_total, kept_doors=kept_doors, kept_windows=kept_wins)
     return rooms_index, legend, m_doors, m_wins, rows, stats
+
 
 def walls_from_rooms_index(rooms_index: np.ndarray) -> np.ndarray:
     a = rooms_index
@@ -229,21 +234,21 @@ def walls_from_rooms_index(rooms_index: np.ndarray) -> np.ndarray:
     walls = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
     return walls
 
-def overlay_openings(base_rgb: np.ndarray, doors: np.ndarray, wins: np.ndarray, walls: Optional[np.ndarray]=None) -> np.ndarray:
+def overlay_openings(base_rgb: np.ndarray, doors: np.ndarray, wins: np.ndarray, walls: Optional[np.ndarray] = None) -> np.ndarray:
     bgr = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2BGR)
+
     if walls is not None:
-        # emprise rapide (optionnel)
         try:
             kernel_e = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
             closed = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, kernel_e, iterations=3)
             inv = cv2.bitwise_not(closed)
-            flood = np.zeros((inv.shape[0]+2, inv.shape[1]+2), np.uint8)
-            cv2.floodFill(inv, flood, (0,0), 255)
+            flood = np.zeros((inv.shape[0] + 2, inv.shape[1] + 2), np.uint8)
+            cv2.floodFill(inv, flood, (0, 0), 255)
             filled = cv2.bitwise_not(inv)
             cnts, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if cnts:
                 cnt = max(cnts, key=cv2.contourArea)
-                cv2.drawContours(bgr, [cnt], -1, (255,0,0), 3)
+                cv2.drawContours(bgr, [cnt], -1, (255, 0, 0), 3)
         except Exception:
             pass
 
@@ -251,45 +256,45 @@ def overlay_openings(base_rgb: np.ndarray, doors: np.ndarray, wins: np.ndarray, 
     cs_w, _ = cv2.findContours(wins,  cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     fill = np.zeros_like(bgr)
-    if cs_d: cv2.fillPoly(fill, cs_d, (255, 0, 255))   # magenta doors
-    if cs_w: cv2.fillPoly(fill, cs_w, (255, 255, 0))   # cyan-ish windows (BGR)
+    if cs_d: cv2.fillPoly(fill, cs_d, (255, 0, 255))   # doors magenta
+    if cs_w: cv2.fillPoly(fill, cs_w, (255, 255, 0))   # windows cyan-ish
     out_bgr = cv2.addWeighted(fill, 0.25, bgr, 0.75, 0)
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
-def df_openings_from_masks(doors: np.ndarray, wins: np.ndarray) -> pd.DataFrame:
+def df_openings_from_masks(doors: np.ndarray, wins: np.ndarray, min_area_d: int, min_area_w: int) -> pd.DataFrame:
     rows = []
 
     def extract(mask: np.ndarray, label: str, min_area: int):
-        num, lab, stats, _ = cv2.connectedComponentsWithStats((mask>0).astype(np.uint8), 8)
+        num, lab, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
         for i in range(1, num):
             x, y, w, h, area = stats[i]
-            if area < min_area:
+            if area < int(min_area):
                 continue
             rows.append({
                 "class": label,
-                "x_px": float(x + w/2),
-                "y_px": float(y + h/2),
+                "x_px": float(x + w / 2),
+                "y_px": float(y + h / 2),
                 "width_px": float(w),
                 "height_px": float(h),
                 "length_px": float(max(w, h)),
                 "area_px2": float(area),
             })
 
-    extract(doors, "door", 6)
-    extract(wins,  "window", 15)
+    extract(doors, "door", min_area_d)
+    extract(wins,  "window", min_area_w)
     return pd.DataFrame(rows)
 
-def to_png_bytes(rgb_or_gray: np.ndarray) -> bytes:
-    if rgb_or_gray.ndim == 2:
-        img = Image.fromarray(rgb_or_gray)
+def to_png_bytes(arr: np.ndarray) -> bytes:
+    if arr.ndim == 2:
+        img = Image.fromarray(arr.astype(np.uint8))
     else:
-        img = Image.fromarray(rgb_or_gray.astype(np.uint8))
+        img = Image.fromarray(arr.astype(np.uint8))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 # ---------------------------
-# SIDEBAR CONTROLS
+# SIDEBAR
 # ---------------------------
 st.sidebar.markdown("### ⚙️ Paramètres")
 params = Params(
@@ -300,12 +305,11 @@ params = Params(
     pass2_over=st.sidebar.selectbox("Pass 2 overlap", [128, 192, 256, 320], index=2),
     conf_min_door=float(st.sidebar.slider("Conf min door", 0.0, 0.5, 0.05, 0.01)),
     conf_min_win=float(st.sidebar.slider("Conf min window", 0.0, 0.8, 0.15, 0.01)),
-    clean_close_k_door=int(st.sidebar.selectbox("Close K door", [1,3,5,7], index=1)),
-    clean_close_k_win=int(st.sidebar.selectbox("Close K window", [3,5,7,9], index=1)),
-    min_area_door_px=int(st.sidebar.selectbox("Min area door (px)", [1,6,15,30], index=1)),
-    min_area_win_px=int(st.sidebar.selectbox("Min area window (px)", [5,15,30,60], index=1)),
+    clean_close_k_door=int(st.sidebar.selectbox("Close K door", [1, 3, 5, 7], index=1)),
+    clean_close_k_win=int(st.sidebar.selectbox("Close K window", [3, 5, 7, 9], index=1)),
+    min_area_door_px=int(st.sidebar.selectbox("Min area door (px)", [1, 6, 15, 30], index=1)),
+    min_area_win_px=int(st.sidebar.selectbox("Min area window (px)", [5, 15, 30, 60], index=1)),
 )
-
 st.sidebar.markdown('<div class="small">Astuce: si tu rates des portes, baisse <b>Conf min door</b> à 0.03 et garde <b>Pass 2</b> à 1024.</div>', unsafe_allow_html=True)
 
 # ---------------------------
@@ -328,20 +332,21 @@ with right:
 if file is not None:
     img_pil = Image.open(file).convert("RGB")
     base_rgb = np.array(img_pil)
+
     with left:
         st.image(img_pil, caption=f"Input • {img_pil.size[0]}×{img_pil.size[1]} px", use_container_width=True)
 
-    colA, colB, colC = st.columns([1,1,1])
+    colA, colB = st.columns([1, 1])
     run = colA.button("🚀 Analyze", use_container_width=True)
-    with colB:
-        st.download_button("⬇️ Télécharger l'image input", data=to_png_bytes(base_rgb), file_name="plan_input.png", mime="image/png", use_container_width=True)
+    colB.download_button("⬇️ Télécharger l'image input", data=to_png_bytes(base_rgb), file_name="plan_input.png", mime="image/png", use_container_width=True)
 
     if run:
-        client = get_client()
-        with st.spinner("Inference (multi-scale)…"):
-            # Pass 1
-            rooms_index, legend, m_doors_1, m_wins_1, rows_1, st1 = infer_pass(
-                client, img_pil, params.pass1_tile, params.pass1_over,
+        client = get_client(API_URL, API_KEY)
+
+        with st.spinner("Inference (multi-scale)…"): 
+            rooms_index, legend, m_doors_1, m_wins_1, rows_1, _ = infer_pass(
+                client, params.model_id, img_pil,
+                params.pass1_tile, params.pass1_over,
                 write_rooms=True,
                 conf_min_door=params.conf_min_door,
                 conf_min_win=params.conf_min_win
@@ -349,9 +354,9 @@ if file is not None:
             m_doors_1 = clean_mask(m_doors_1, params.min_area_door_px, params.clean_close_k_door)
             m_wins_1  = clean_mask(m_wins_1,  params.min_area_win_px,  params.clean_close_k_win)
 
-            # Pass 2 (openings only)
-            _, _, m_doors_2, m_wins_2, rows_2, st2 = infer_pass(
-                client, img_pil, params.pass2_tile, params.pass2_over,
+            _, _, m_doors_2, m_wins_2, rows_2, _ = infer_pass(
+                client, params.model_id, img_pil,
+                params.pass2_tile, params.pass2_over,
                 write_rooms=False,
                 conf_min_door=params.conf_min_door,
                 conf_min_win=params.conf_min_win
@@ -366,14 +371,13 @@ if file is not None:
             overlay = overlay_openings(base_rgb, doors, wins, walls)
 
             df_det = pd.DataFrame(rows_1 + rows_2)
-            df_open = df_openings_from_masks(doors, wins)
+            df_open = df_openings_from_masks(doors, wins, params.min_area_door_px, params.min_area_win_px)
 
-        # Metrics
         with right:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
-            c1.metric("🚪 Portes (contours)", int((df_open["class"]=="door").sum()) if not df_open.empty else 0)
-            c2.metric("🪟 Fenêtres (contours)", int((df_open["class"]=="window").sum()) if not df_open.empty else 0)
+            c1.metric("🚪 Portes", int((df_open["class"] == "door").sum()) if not df_open.empty else 0)
+            c2.metric("🪟 Fenêtres", int((df_open["class"] == "window").sum()) if not df_open.empty else 0)
             c3.metric("🧱 Rooms classes", len(legend) if isinstance(legend, dict) else 0)
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -382,7 +386,6 @@ if file is not None:
             st.image(overlay, use_container_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Previews + downloads
         p1, p2, p3 = st.columns(3)
         p1.image(doors, caption="mask_doors", use_container_width=True, clamp=True)
         p2.image(wins, caption="mask_windows", use_container_width=True, clamp=True)
@@ -400,15 +403,18 @@ if file is not None:
         else:
             dl4.download_button("⬇️ mask_walls.png", data=b"", file_name="mask_walls.png", mime="image/png", disabled=True, use_container_width=True)
 
-        # Tables
         st.markdown("### Detections (brutes)")
-        st.dataframe(df_det.sort_values("confidence", ascending=False), use_container_width=True, height=260)
+        if not df_det.empty:
+            st.dataframe(df_det.sort_values("confidence", ascending=False), use_container_width=True, height=260)
+        else:
+            st.info("Aucune détection brute.")
 
         st.markdown("### Openings (depuis masques)")
-        st.dataframe(df_open.sort_values(["class","area_px2"], ascending=[True, False]) if not df_open.empty else df_open,
-                     use_container_width=True, height=260)
+        if not df_open.empty:
+            st.dataframe(df_open.sort_values(["class", "area_px2"], ascending=[True, False]), use_container_width=True, height=260)
+        else:
+            st.info("Aucune ouverture trouvée.")
 
-        # CSV downloads
         csv1 = df_det.to_csv(index=False).encode("utf-8")
         csv2 = df_open.to_csv(index=False).encode("utf-8")
         cdl1, cdl2 = st.columns(2)
