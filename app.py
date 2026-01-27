@@ -331,22 +331,51 @@ with right:
     st.write("Upload une image puis clique sur **Analyze**.")
     st.markdown('</div>', unsafe_allow_html=True)
 
+def ensure_rgb_u8(img_pil: Image.Image) -> np.ndarray:
+    im = img_pil.convert("RGB")
+    arr = np.array(im)
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    if arr.shape[-1] != 3:
+        arr = arr[:, :, :3]
+    return arr
+
+def rgb_to_png_bytes(rgb_u8: np.ndarray) -> bytes:
+    img = Image.fromarray(rgb_u8, mode="RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+
+
 if file is not None:
-    img_pil = Image.open(file).convert("RGB")
-    base_rgb = np.array(img_pil)
+    img_pil = Image.open(file)  # pas de .convert ici
+    base_rgb = ensure_rgb_u8(img_pil)
 
     with left:
         st.image(
-        base_rgb,
-        caption=f"Input • {base_rgb.shape[1]}×{base_rgb.shape[0]} px",
-        use_container_width=True
+            rgb_to_png_bytes(base_rgb),
+            caption=f"Input • {base_rgb.shape[1]}×{base_rgb.shape[0]} px",
+            use_container_width=True
         )
 
 
     colA, colB = st.columns([1, 1])
     run = colA.button("🚀 Analyze", use_container_width=True)
     colB.download_button("⬇️ Télécharger l'image input", data=to_png_bytes(base_rgb), file_name="plan_input.png", mime="image/png", use_container_width=True)
+    colB.download_button(
+        "⬇️ Télécharger l'image input",
+        data=rgb_to_png_bytes(base_rgb),
+        file_name="plan_input.png",
+        mime="image/png",
+        use_container_width=True
+    )
 
+    
+    
     if run:
         client = get_client(API_URL, API_KEY)
 
