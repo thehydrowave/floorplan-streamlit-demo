@@ -19,7 +19,7 @@ except Exception:
 def image_in(container, img, **kwargs):
     """
     Affiche une image dans un container (st, colonne, expander, etc.)
-    Compatible avec anciennes/nouvelles versions Streamlit:
+    Compatible anciennes/nouvelles versions Streamlit:
     - use_container_width (récent)
     - use_column_width (ancien)
     """
@@ -29,9 +29,7 @@ def image_in(container, img, **kwargs):
         return container.image(img, use_column_width=True, **kwargs)
 
 def download_in(container, label, data, file_name, mime, **kwargs):
-    """
-    Bouton download compatible anciennes/nouvelles versions Streamlit.
-    """
+    """download_button compatible anciennes/nouvelles versions Streamlit."""
     try:
         return container.download_button(
             label,
@@ -52,9 +50,7 @@ def download_in(container, label, data, file_name, mime, **kwargs):
         )
 
 def button_in(container, label, **kwargs):
-    """
-    Bouton compatible anciennes/nouvelles versions Streamlit (width).
-    """
+    """button compatible anciennes/nouvelles versions Streamlit."""
     try:
         return container.button(label, use_container_width=True, **kwargs)
     except TypeError:
@@ -85,7 +81,7 @@ st.markdown(
 
 st.markdown('<p class="h-title">🏠 Floor Plan Analyzer</p>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="h-sub">Démo Streamlit : upload d’un plan → détection portes/fenêtres → masques + overlay + emprise lots + calibration auto → export CSV.</p>',
+    '<p class="h-sub">Upload → Roboflow portes/fenêtres → masques + overlay → emprise lots (K-means) → calibration auto → surfaces/pourtours → exports.</p>',
     unsafe_allow_html=True,
 )
 st.write("")
@@ -106,7 +102,7 @@ if not API_KEY:
     st.stop()
 
 # ---------------------------
-# IMAGE UTILS (robustes Streamlit Cloud)
+# IMAGE UTILS
 # ---------------------------
 def ensure_rgb_u8(img_pil: Image.Image) -> np.ndarray:
     im = img_pil.convert("RGB")
@@ -166,6 +162,9 @@ def clean_mask(mask: np.ndarray, min_area: int, close_k: int) -> np.ndarray:
 def get_client(api_url: str, api_key: str):
     return InferenceHTTPClient(api_url=api_url, api_key=api_key)
 
+# ---------------------------
+# PARAMS
+# ---------------------------
 @dataclass
 class Params:
     # Roboflow
@@ -190,6 +189,13 @@ class Params:
     # Calibration auto (portes)
     assumed_door_width_m: float = 0.90
 
+    # Surfaces
+    wall_thickness_m: float = 0.20
+    habitable_perimeter_mode: str = "total"  # "total" ou "external"
+
+# ---------------------------
+# ROBOFLOW INFERENCE
+# ---------------------------
 def infer_pass(
     client: InferenceHTTPClient,
     model_id: str,
@@ -381,9 +387,9 @@ def overlay_openings(base_rgb: np.ndarray, doors: np.ndarray, wins: np.ndarray, 
 
     fill = np.zeros_like(bgr)
     if cs_d:
-        cv2.fillPoly(fill, cs_d, (255, 0, 255))  # doors magenta
+        cv2.fillPoly(fill, cs_d, (255, 0, 255))
     if cs_w:
-        cv2.fillPoly(fill, cs_w, (255, 255, 0))  # windows cyan-ish (BGR)
+        cv2.fillPoly(fill, cs_w, (255, 255, 0))
     out_bgr = cv2.addWeighted(fill, 0.25, bgr, 0.75, 0)
     return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
 
@@ -413,7 +419,7 @@ def df_openings_from_masks(doors: np.ndarray, wins: np.ndarray, min_area_d: int,
     return pd.DataFrame(rows)
 
 # ---------------------------
-# EMPRISE / LOTS (K-means) — comme ton notebook
+# EMPRISE / LOTS (K-means)
 # ---------------------------
 def detect_units_kmeans(
     base_rgb: np.ndarray,
@@ -426,7 +432,6 @@ def detect_units_kmeans(
     H, W = img_bgr.shape[:2]
     min_area = int(min_area_ratio * H * W)
 
-    # downscale
     scale = 1.0
     if max(H, W) > work_max:
         scale = work_max / max(H, W)
@@ -436,7 +441,6 @@ def detect_units_kmeans(
 
     hs, ws = img_small.shape[:2]
 
-    # kmeans in Lab
     img_lab = cv2.cvtColor(img_small, cv2.COLOR_BGR2LAB)
     X = img_lab.reshape(-1, 3).astype(np.float32)
 
@@ -445,10 +449,8 @@ def detect_units_kmeans(
     labels = labels.reshape(hs, ws)
     centers = centers.astype(np.uint8)
 
-    # background cluster = max L
     bg_cluster = int(np.argmax(centers[:, 0]))
 
-    # build union mask on small
     mask_all_units = np.zeros((hs, ws), np.uint8)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(smooth_k), int(smooth_k)))
 
@@ -459,12 +461,9 @@ def detect_units_kmeans(
             continue
 
         m = (labels == c).astype(np.uint8) * 255
-
-        # morpho cleanup
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k, iterations=1)
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=2)
 
-        # connected components (small)
         num, lab, stats, _ = cv2.connectedComponentsWithStats((m > 0).astype(np.uint8), 8)
         for i in range(1, num):
             area = int(stats[i, cv2.CC_STAT_AREA])
@@ -473,13 +472,11 @@ def detect_units_kmeans(
             comp = (lab == i).astype(np.uint8) * 255
             mask_all_units = cv2.bitwise_or(mask_all_units, comp)
 
-    # upscale to original size
     if scale != 1.0:
         mask_units = cv2.resize(mask_all_units, (W, H), interpolation=cv2.INTER_NEAREST)
     else:
         mask_units = mask_all_units
 
-    # re-CC in original size to get final lots
     num, lab, stats, _ = cv2.connectedComponentsWithStats((mask_units > 0).astype(np.uint8), 8)
 
     overlay = img_bgr.copy()
@@ -505,7 +502,6 @@ def detect_units_kmeans(
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
 
-        # draw
         cv2.drawContours(overlay, [cnt], -1, (0, 255, 0), 3)
         if cx is not None and cy is not None:
             cv2.putText(
@@ -542,7 +538,6 @@ def detect_units_kmeans(
         "min_area_px2": int(min_area),
         "lots": int(idx),
     }
-
     return mask_units.astype(np.uint8), overlay_rgb.astype(np.uint8), df_lots, meta
 
 # ---------------------------
@@ -567,7 +562,6 @@ def estimate_scale_from_doors_using_units(
     if doors.empty:
         return None, {"reason": "no doors"}
 
-    # portes dans l'emprise (si dispo)
     if mask_units is not None:
         inside = []
         for _, r in doors.iterrows():
@@ -584,7 +578,6 @@ def estimate_scale_from_doors_using_units(
     if vals.size < min_doors:
         return None, {"reason": f"not enough doors ({vals.size})"}
 
-    # filtre outliers (robuste)
     q20, q80 = np.quantile(vals, [0.20, 0.80])
     core = vals[(vals >= q20) & (vals <= q80)]
     if core.size < 1:
@@ -596,7 +589,7 @@ def estimate_scale_from_doors_using_units(
 
     m_per_px = float(assumed_door_width_m) / door_px_med
 
-    spread = float(np.std(core) / (np.mean(core) + 1e-9))  # coeff variation
+    spread = float(np.std(core) / (np.mean(core) + 1e-9))
     meta = {
         "assumed_door_width_m": float(assumed_door_width_m),
         "doors_total_used_for_filtering": int(vals.size),
@@ -608,6 +601,73 @@ def estimate_scale_from_doors_using_units(
         "px_per_m": 1.0 / m_per_px if m_per_px > 0 else None,
     }
     return m_per_px, meta
+
+# ---------------------------
+# SURFACES & POURTOURS
+# ---------------------------
+def _px_metrics_from_mask(mask_u8: np.ndarray, external_only: bool = True):
+    """
+    Retourne area_px2, perimeter_px.
+    - external_only=True: contours externes uniquement
+    - external_only=False: externes + internes (souvent beaucoup plus grand)
+    """
+    m = (mask_u8 > 0).astype(np.uint8) * 255
+    area_px2 = float(np.count_nonzero(m))
+
+    mode = cv2.RETR_EXTERNAL if external_only else cv2.RETR_CCOMP
+    cnts, _ = cv2.findContours(m, mode, cv2.CHAIN_APPROX_SIMPLE)
+
+    perim_px = 0.0
+    for c in cnts:
+        perim_px += float(cv2.arcLength(c, True))
+    return area_px2, perim_px
+
+def compute_surfaces_pourtours(
+    mask_units: np.ndarray,
+    m_per_px: float,
+    wall_thickness_m: float = 0.20,
+    habitable_perimeter_mode: str = "total",  # "total" ou "external"
+):
+    """
+    - Surface emprise (m²)
+    - Pourtour emprise (m) : externe
+    - Habitable ~ érosion de l'emprise d'une épaisseur wall_thickness_m
+    - Surface murs = emprise - habitable
+    - Pourtour habitable: total (externes+internes) ou externe
+    """
+    if mask_units is None or mask_units.size == 0 or m_per_px is None or m_per_px <= 0:
+        return None
+
+    # Emprise
+    area_px2, perim_px_ext = _px_metrics_from_mask(mask_units, external_only=True)
+    area_m2 = area_px2 * (m_per_px ** 2)
+    perim_m_ext = perim_px_ext * m_per_px
+
+    # wall thickness in px
+    t_px = max(1, int(round(wall_thickness_m / m_per_px)))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * t_px + 1, 2 * t_px + 1))
+
+    m = (mask_units > 0).astype(np.uint8) * 255
+    hab = cv2.erode(m, k, iterations=1)
+
+    hab_area_px2 = float(np.count_nonzero(hab))
+    hab_area_m2 = hab_area_px2 * (m_per_px ** 2)
+    wall_area_m2 = max(0.0, area_m2 - hab_area_m2)
+
+    hab_external_only = (habitable_perimeter_mode == "external")
+    _, hab_perim_px = _px_metrics_from_mask(hab, external_only=hab_external_only)
+    hab_perim_m = hab_perim_px * m_per_px
+
+    return {
+        "surface_emprise_m2": float(area_m2),
+        "pourtour_emprise_m": float(perim_m_ext),
+        "surface_murs_m2": float(wall_area_m2),
+        "wall_thickness_m": float(wall_thickness_m),
+        "wall_thickness_px": int(t_px),
+        "surface_habitable_m2": float(hab_area_m2),
+        "pourtour_habitable_m": float(hab_perim_m),
+        "mask_habitable": hab.astype(np.uint8),
+    }
 
 # ---------------------------
 # SIDEBAR
@@ -635,9 +695,11 @@ params = Params(
     kmeans_work_max=int(st.sidebar.selectbox("Emprise: work_max", [1200, 1600, 2000, 2400], index=2)),
 
     # Calibration auto
-    assumed_door_width_m=float(
-        st.sidebar.selectbox("Calibration auto: largeur porte (m)", [0.73, 0.80, 0.90, 1.00], index=2)
-    ),
+    assumed_door_width_m=float(st.sidebar.selectbox("Calibration auto: largeur porte (m)", [0.73, 0.80, 0.90, 1.00], index=2)),
+
+    # Surfaces
+    wall_thickness_m=float(st.sidebar.slider("Murs: épaisseur (m)", 0.10, 0.35, 0.20, 0.01)),
+    habitable_perimeter_mode=str(st.sidebar.selectbox("Pourtour habitable", ["total", "external"], index=0)),
 )
 
 st.sidebar.markdown(
@@ -701,7 +763,7 @@ if file is not None:
             m_doors_1 = clean_mask(m_doors_1, params.min_area_door_px, params.clean_close_k_door)
             m_wins_1 = clean_mask(m_wins_1, params.min_area_win_px, params.clean_close_k_win)
 
-            # Pass 2 (openings only)
+            # Pass 2
             _, _, m_doors_2, m_wins_2, rows_2, _ = infer_pass(
                 client,
                 params.model_id,
@@ -724,7 +786,7 @@ if file is not None:
             df_det = pd.DataFrame(rows_1 + rows_2)
             df_open = df_openings_from_masks(doors, wins, params.min_area_door_px, params.min_area_win_px)
 
-            # ---- Emprise / lots (K-means)
+            # Emprise / lots
             mask_units, lots_overlay, df_lots, lots_meta = detect_units_kmeans(
                 base_rgb,
                 K=params.kmeans_K,
@@ -733,7 +795,7 @@ if file is not None:
                 work_max=params.kmeans_work_max,
             )
 
-            # ---- Calibration auto (portes) en utilisant l'emprise
+            # Calibration auto
             m_per_px, scale_meta = estimate_scale_from_doors_using_units(
                 df_open=df_open,
                 mask_units=mask_units,
@@ -745,8 +807,16 @@ if file is not None:
             else:
                 st.session_state.pop("m_per_px", None)
 
-            # ---- Conversions m / m² (si échelle ok)
+            # Surfaces/pourtours (si calibré)
+            surfaces = None
             if "m_per_px" in st.session_state and st.session_state["m_per_px"] > 0:
+                surfaces = compute_surfaces_pourtours(
+                    mask_units=mask_units,
+                    m_per_px=float(st.session_state["m_per_px"]),
+                    wall_thickness_m=params.wall_thickness_m,
+                    habitable_perimeter_mode=params.habitable_perimeter_mode,
+                )
+
                 mpp = float(st.session_state["m_per_px"])
                 if not df_open.empty:
                     df_open = df_open.copy()
@@ -756,7 +826,9 @@ if file is not None:
                     df_lots = df_lots.copy()
                     df_lots["area_m2"] = df_lots["area_px2"].astype(float) * (mpp ** 2)
 
-        # Right panel results
+        # ---------------------------
+        # RIGHT PANEL
+        # ---------------------------
         with right:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
@@ -770,7 +842,6 @@ if file is not None:
             image_in(st, rgb_to_png_bytes(overlay))
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # Calibration summary
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.subheader("📏 Calibration auto (portes)")
             if m_per_px is None:
@@ -784,7 +855,30 @@ if file is not None:
                     st.warning("Qualité faible → préfère calibration manuelle (2 points) si tu veux du fiable.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # Masks previews
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.subheader("Surfaces & pourtours")
+            if surfaces is None:
+                st.info("Surfaces indisponibles (échelle non calibrée).")
+            else:
+                st.write(
+                    f"📐 Surface emprise: **{surfaces['surface_emprise_m2']:.2f} m²** | "
+                    f"Pourtour: **{surfaces['pourtour_emprise_m']:.2f} m**"
+                )
+                st.write(
+                    f"🧱 Surface murs: **{surfaces['surface_murs_m2']:.2f} m²** "
+                    f"(épaisseur ~ **{surfaces['wall_thickness_m']:.2f} m** ≈ {surfaces['wall_thickness_px']} px)"
+                )
+                st.write(
+                    f"✅ Surface habitable: **{surfaces['surface_habitable_m2']:.2f} m²** | "
+                    f"Pourtour habitable: **{surfaces['pourtour_habitable_m']:.2f} m**"
+                )
+                with st.expander("Voir mask_habitable (debug)"):
+                    image_in(st, gray_to_png_bytes(surfaces["mask_habitable"]), caption="mask_habitable")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ---------------------------
+        # MASKS PREVIEW
+        # ---------------------------
         st.markdown("### 🧪 Masques (portes / fenêtres / murs)")
         p1, p2, p3 = st.columns(3)
         image_in(p1, gray_to_png_bytes(doors), caption="mask_doors")
@@ -794,7 +888,9 @@ if file is not None:
         else:
             p3.info("Walls indisponibles")
 
-        # Emprise / lots previews
+        # ---------------------------
+        # EMPRISE / LOTS
+        # ---------------------------
         st.markdown("### 🧩 Emprise / Lots (K-means)")
         e1, e2 = st.columns(2)
         with e1:
@@ -809,77 +905,30 @@ if file is not None:
             f"min_area={lots_meta.get('min_area_px2')} px² | lots={lots_meta.get('lots')}"
         )
 
-        # Downloads images
+        # ---------------------------
+        # DOWNLOADS IMAGES
+        # ---------------------------
         st.markdown("### ⬇️ Downloads images")
         dl1, dl2, dl3, dl4 = st.columns(4)
-        download_in(
-            dl1,
-            "⬇️ overlay_openings.png",
-            data=rgb_to_png_bytes(overlay),
-            file_name="overlay_openings.png",
-            mime="image/png",
-        )
-        download_in(
-            dl2,
-            "⬇️ mask_doors.png",
-            data=gray_to_png_bytes(doors),
-            file_name="mask_doors.png",
-            mime="image/png",
-        )
-        download_in(
-            dl3,
-            "⬇️ mask_windows.png",
-            data=gray_to_png_bytes(wins),
-            file_name="mask_windows.png",
-            mime="image/png",
-        )
+        download_in(dl1, "⬇️ overlay_openings.png", rgb_to_png_bytes(overlay), "overlay_openings.png", "image/png")
+        download_in(dl2, "⬇️ mask_doors.png", gray_to_png_bytes(doors), "mask_doors.png", "image/png")
+        download_in(dl3, "⬇️ mask_windows.png", gray_to_png_bytes(wins), "mask_windows.png", "image/png")
         if walls is not None:
-            download_in(
-                dl4,
-                "⬇️ mask_walls.png",
-                data=gray_to_png_bytes(walls),
-                file_name="mask_walls.png",
-                mime="image/png",
-            )
+            download_in(dl4, "⬇️ mask_walls.png", gray_to_png_bytes(walls), "mask_walls.png", "image/png")
         else:
             try:
-                dl4.download_button(
-                    "⬇️ mask_walls.png",
-                    data=b"",
-                    file_name="mask_walls.png",
-                    mime="image/png",
-                    disabled=True,
-                    use_container_width=True,
-                )
+                dl4.download_button("⬇️ mask_walls.png", data=b"", file_name="mask_walls.png", mime="image/png", disabled=True, use_container_width=True)
             except TypeError:
-                dl4.download_button(
-                    "⬇️ mask_walls.png",
-                    data=b"",
-                    file_name="mask_walls.png",
-                    mime="image/png",
-                    disabled=True,
-                    use_column_width=True,
-                )
+                dl4.download_button("⬇️ mask_walls.png", data=b"", file_name="mask_walls.png", mime="image/png", disabled=True, use_column_width=True)
 
-        # Downloads emprise / lots
         st.markdown("### ⬇️ Downloads emprise / lots")
         dlu1, dlu2 = st.columns(2)
-        download_in(
-            dlu1,
-            "⬇️ lots_overlay.png",
-            data=rgb_to_png_bytes(lots_overlay),
-            file_name="lots_overlay.png",
-            mime="image/png",
-        )
-        download_in(
-            dlu2,
-            "⬇️ mask_units.png",
-            data=gray_to_png_bytes(mask_units),
-            file_name="mask_units.png",
-            mime="image/png",
-        )
+        download_in(dlu1, "⬇️ lots_overlay.png", rgb_to_png_bytes(lots_overlay), "lots_overlay.png", "image/png")
+        download_in(dlu2, "⬇️ mask_units.png", gray_to_png_bytes(mask_units), "mask_units.png", "image/png")
 
-        # Tables
+        # ---------------------------
+        # TABLES
+        # ---------------------------
         st.markdown("### Detections (brutes)")
         if not df_det.empty:
             st.dataframe(df_det.sort_values("confidence", ascending=False), height=260)
@@ -888,10 +937,7 @@ if file is not None:
 
         st.markdown("### Openings (depuis masques)")
         if not df_open.empty:
-            # si calibré, on met length_m / area_m2 dedans
-            sort_cols = ["class", "area_px2"]
-            asc = [True, False]
-            st.dataframe(df_open.sort_values(sort_cols, ascending=asc), height=260)
+            st.dataframe(df_open.sort_values(["class", "area_px2"], ascending=[True, False]), height=260)
         else:
             st.info("Aucune ouverture trouvée.")
 
@@ -901,51 +947,21 @@ if file is not None:
         else:
             st.info("Aucun lot détecté (essaie K=10 ou min_area_ratio=0.005).")
 
-        # CSV downloads
+        # ---------------------------
+        # CSV DOWNLOADS
+        # ---------------------------
         st.markdown("### ⬇️ Downloads CSV")
         csv1 = df_det.to_csv(index=False).encode("utf-8")
         csv2 = df_open.to_csv(index=False).encode("utf-8")
         csv3 = df_lots.to_csv(index=False).encode("utf-8") if not df_lots.empty else b""
 
         cdl1, cdl2, cdl3 = st.columns(3)
-        download_in(
-            cdl1,
-            "⬇️ doors_windows_detections.csv",
-            data=csv1,
-            file_name="doors_windows_detections.csv",
-            mime="text/csv",
-        )
-        download_in(
-            cdl2,
-            "⬇️ openings_from_masks.csv",
-            data=csv2,
-            file_name="openings_from_masks.csv",
-            mime="text/csv",
-        )
+        download_in(cdl1, "⬇️ doors_windows_detections.csv", csv1, "doors_windows_detections.csv", "text/csv")
+        download_in(cdl2, "⬇️ openings_from_masks.csv", csv2, "openings_from_masks.csv", "text/csv")
         if not df_lots.empty:
-            download_in(
-                cdl3,
-                "⬇️ lots.csv",
-                data=csv3,
-                file_name="lots.csv",
-                mime="text/csv",
-            )
+            download_in(cdl3, "⬇️ lots.csv", csv3, "lots.csv", "text/csv")
         else:
             try:
-                cdl3.download_button(
-                    "⬇️ lots.csv",
-                    data=b"",
-                    file_name="lots.csv",
-                    mime="text/csv",
-                    disabled=True,
-                    use_container_width=True,
-                )
+                cdl3.download_button("⬇️ lots.csv", data=b"", file_name="lots.csv", mime="text/csv", disabled=True, use_container_width=True)
             except TypeError:
-                cdl3.download_button(
-                    "⬇️ lots.csv",
-                    data=b"",
-                    file_name="lots.csv",
-                    mime="text/csv",
-                    disabled=True,
-                    use_column_width=True,
-                )
+                cdl3.download_button("⬇️ lots.csv", data=b"", file_name="lots.csv", mime="text/csv", disabled=True, use_column_width=True)
