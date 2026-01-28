@@ -14,6 +14,53 @@ except Exception:
     InferenceHTTPClient = None
 
 # ---------------------------
+# STREAMLIT COMPAT (Cloud: versions différentes)
+# ---------------------------
+def image_in(container, img, **kwargs):
+    """
+    Affiche une image dans un container (st, colonne, expander, etc.)
+    Compatible avec anciennes/nouvelles versions Streamlit:
+    - use_container_width (récent)
+    - use_column_width (ancien)
+    """
+    try:
+        return container.image(img, use_container_width=True, **kwargs)
+    except TypeError:
+        return container.image(img, use_column_width=True, **kwargs)
+
+def download_in(container, label, data, file_name, mime, **kwargs):
+    """
+    Bouton download compatible anciennes/nouvelles versions Streamlit.
+    """
+    try:
+        return container.download_button(
+            label,
+            data=data,
+            file_name=file_name,
+            mime=mime,
+            use_container_width=True,
+            **kwargs,
+        )
+    except TypeError:
+        return container.download_button(
+            label,
+            data=data,
+            file_name=file_name,
+            mime=mime,
+            use_column_width=True,
+            **kwargs,
+        )
+
+def button_in(container, label, **kwargs):
+    """
+    Bouton compatible anciennes/nouvelles versions Streamlit (width).
+    """
+    try:
+        return container.button(label, use_container_width=True, **kwargs)
+    except TypeError:
+        return container.button(label, use_column_width=True, **kwargs)
+
+# ---------------------------
 # UI / THEME
 # ---------------------------
 st.set_page_config(page_title="Floor Plan Analyzer (Demo)", page_icon="🏠", layout="wide")
@@ -399,20 +446,20 @@ if file is not None:
     base_rgb = ensure_rgb_u8(img_pil)
 
     with left:
-        st.image(
+        image_in(
+            st,
             rgb_to_png_bytes(base_rgb),
             caption=f"Input • {base_rgb.shape[1]}×{base_rgb.shape[0]} px",
-            use_container_width=True,
         )
 
     colA, colB = st.columns([1, 1])
-    run = colA.button("🚀 Analyze", use_container_width=True)
-    colB.download_button(
+    run = button_in(colA, "🚀 Analyze")
+    download_in(
+        colB,
         "⬇️ Télécharger l'image input",
         data=rgb_to_png_bytes(base_rgb),
         file_name="plan_input.png",
         mime="image/png",
-        use_container_width=True,
     )
 
     if run:
@@ -467,69 +514,80 @@ if file is not None:
 
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.subheader("Overlay")
-            st.image(rgb_to_png_bytes(overlay), use_container_width=True)
+            image_in(st, rgb_to_png_bytes(overlay))
             st.markdown("</div>", unsafe_allow_html=True)
 
         # Masks previews (bytes)
         p1, p2, p3 = st.columns(3)
-        p1.image(gray_to_png_bytes(doors), caption="mask_doors", use_container_width=True)
-        p2.image(gray_to_png_bytes(wins), caption="mask_windows", use_container_width=True)
+        image_in(p1, gray_to_png_bytes(doors), caption="mask_doors")
+        image_in(p2, gray_to_png_bytes(wins), caption="mask_windows")
         if walls is not None:
-            p3.image(gray_to_png_bytes(walls), caption="mask_walls (from rooms)", use_container_width=True)
+            image_in(p3, gray_to_png_bytes(walls), caption="mask_walls (from rooms)")
         else:
             p3.info("Walls indisponibles")
 
         # Downloads
         dl1, dl2, dl3, dl4 = st.columns(4)
-        dl1.download_button(
+        download_in(
+            dl1,
             "⬇️ overlay_openings.png",
             data=rgb_to_png_bytes(overlay),
             file_name="overlay_openings.png",
             mime="image/png",
-            use_container_width=True,
         )
-        dl2.download_button(
+        download_in(
+            dl2,
             "⬇️ mask_doors.png",
             data=gray_to_png_bytes(doors),
             file_name="mask_doors.png",
             mime="image/png",
-            use_container_width=True,
         )
-        dl3.download_button(
+        download_in(
+            dl3,
             "⬇️ mask_windows.png",
             data=gray_to_png_bytes(wins),
             file_name="mask_windows.png",
             mime="image/png",
-            use_container_width=True,
         )
         if walls is not None:
-            dl4.download_button(
+            download_in(
+                dl4,
                 "⬇️ mask_walls.png",
                 data=gray_to_png_bytes(walls),
                 file_name="mask_walls.png",
                 mime="image/png",
-                use_container_width=True,
             )
         else:
-            dl4.download_button(
-                "⬇️ mask_walls.png",
-                data=b"",
-                file_name="mask_walls.png",
-                mime="image/png",
-                disabled=True,
-                use_container_width=True,
-            )
+            # disabled compat
+            try:
+                dl4.download_button(
+                    "⬇️ mask_walls.png",
+                    data=b"",
+                    file_name="mask_walls.png",
+                    mime="image/png",
+                    disabled=True,
+                    use_container_width=True,
+                )
+            except TypeError:
+                dl4.download_button(
+                    "⬇️ mask_walls.png",
+                    data=b"",
+                    file_name="mask_walls.png",
+                    mime="image/png",
+                    disabled=True,
+                    use_column_width=True,
+                )
 
         # Tables
         st.markdown("### Detections (brutes)")
         if not df_det.empty:
-            st.dataframe(df_det.sort_values("confidence", ascending=False), use_container_width=True, height=260)
+            st.dataframe(df_det.sort_values("confidence", ascending=False), height=260)
         else:
             st.info("Aucune détection brute.")
 
         st.markdown("### Openings (depuis masques)")
         if not df_open.empty:
-            st.dataframe(df_open.sort_values(["class", "area_px2"], ascending=[True, False]), use_container_width=True, height=260)
+            st.dataframe(df_open.sort_values(["class", "area_px2"], ascending=[True, False]), height=260)
         else:
             st.info("Aucune ouverture trouvée.")
 
@@ -537,17 +595,17 @@ if file is not None:
         csv1 = df_det.to_csv(index=False).encode("utf-8")
         csv2 = df_open.to_csv(index=False).encode("utf-8")
         cdl1, cdl2 = st.columns(2)
-        cdl1.download_button(
+        download_in(
+            cdl1,
             "⬇️ doors_windows_detections.csv",
             data=csv1,
             file_name="doors_windows_detections.csv",
             mime="text/csv",
-            use_container_width=True,
         )
-        cdl2.download_button(
+        download_in(
+            cdl2,
             "⬇️ openings_from_masks.csv",
             data=csv2,
             file_name="openings_from_masks.csv",
             mime="text/csv",
-            use_container_width=True,
         )
