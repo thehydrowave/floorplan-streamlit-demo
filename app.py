@@ -81,7 +81,7 @@ st.markdown(
 
 st.markdown('<p class="h-title">🏠 Floor Plan Analyzer</p>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="h-sub">Upload → Roboflow portes/fenêtres → masques + overlay → emprise lots (K-means) → calibration auto → surfaces/pourtours → exports.</p>',
+    '<p class="h-sub">Upload → Roboflow portes/fenêtres → masques + overlay → emprise lots (K-means) → calibration auto → surfaces/pourtours + image "Intérieur (vert)" → exports.</p>',
     unsafe_allow_html=True,
 )
 st.write("")
@@ -192,6 +192,9 @@ class Params:
     # Surfaces
     wall_thickness_m: float = 0.20
     habitable_perimeter_mode: str = "total"  # "total" ou "external"
+
+    # Visu intérieur (vert)
+    interior_alpha: float = 0.28  # transparence du vert
 
 # ---------------------------
 # ROBOFLOW INFERENCE
@@ -541,7 +544,7 @@ def detect_units_kmeans(
     return mask_units.astype(np.uint8), overlay_rgb.astype(np.uint8), df_lots, meta
 
 # ---------------------------
-# CALIBRATION AUTO (portes) + filtre "dans emprise"
+# CALIBRATION AUTO (portes)
 # ---------------------------
 def point_in_mask(mask_u8: np.ndarray, x: float, y: float) -> bool:
     H, W = mask_u8.shape[:2]
@@ -603,14 +606,9 @@ def estimate_scale_from_doors_using_units(
     return m_per_px, meta
 
 # ---------------------------
-# SURFACES & POURTOURS
+# SURFACES & POURTOURS + IMAGE "Intérieur (vert)"
 # ---------------------------
 def _px_metrics_from_mask(mask_u8: np.ndarray, external_only: bool = True):
-    """
-    Retourne area_px2, perimeter_px.
-    - external_only=True: contours externes uniquement
-    - external_only=False: externes + internes (souvent beaucoup plus grand)
-    """
     m = (mask_u8 > 0).astype(np.uint8) * 255
     area_px2 = float(np.count_nonzero(m))
 
@@ -628,22 +626,13 @@ def compute_surfaces_pourtours(
     wall_thickness_m: float = 0.20,
     habitable_perimeter_mode: str = "total",  # "total" ou "external"
 ):
-    """
-    - Surface emprise (m²)
-    - Pourtour emprise (m) : externe
-    - Habitable ~ érosion de l'emprise d'une épaisseur wall_thickness_m
-    - Surface murs = emprise - habitable
-    - Pourtour habitable: total (externes+internes) ou externe
-    """
     if mask_units is None or mask_units.size == 0 or m_per_px is None or m_per_px <= 0:
         return None
 
-    # Emprise
     area_px2, perim_px_ext = _px_metrics_from_mask(mask_units, external_only=True)
     area_m2 = area_px2 * (m_per_px ** 2)
     perim_m_ext = perim_px_ext * m_per_px
 
-    # wall thickness in px
     t_px = max(1, int(round(wall_thickness_m / m_per_px)))
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * t_px + 1, 2 * t_px + 1))
 
@@ -669,13 +658,31 @@ def compute_surfaces_pourtours(
         "mask_habitable": hab.astype(np.uint8),
     }
 
+def overlay_interior_green(base_rgb: np.ndarray, mask_habitable_u8: np.ndarray, alpha: float = 0.28) -> np.ndarray:
+    """
+    Génère l'image comme ton exemple:
+    "Intérieur (vert) = surface habitable approx"
+    """
+    rgb = base_rgb.copy()
+    green = np.zeros_like(rgb)
+    green[:, :, 1] = 255  # canal vert
+
+    m = (mask_habitable_u8 > 0).astype(np.uint8)
+    if m.ndim == 2:
+        m3 = np.stack([m, m, m], axis=-1)
+    else:
+        m3 = m
+
+    out = rgb.copy().astype(np.float32)
+    out[m3 > 0] = (1 - alpha) * out[m3 > 0] + alpha * green[m3 > 0]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
 # ---------------------------
 # SIDEBAR
 # ---------------------------
 st.sidebar.markdown("### ⚙️ Paramètres")
 
 params = Params(
-    # Roboflow
     model_id=st.sidebar.text_input("Roboflow model_id", value=DEFAULT_MODEL_ID),
     pass1_tile=st.sidebar.selectbox("Pass 1 tile", [1536, 2048, 2560], index=1),
     pass1_over=st.sidebar.selectbox("Pass 1 overlap", [256, 384, 512, 640], index=2),
@@ -688,18 +695,17 @@ params = Params(
     min_area_door_px=int(st.sidebar.selectbox("Min area door (px)", [1, 6, 15, 30], index=1)),
     min_area_win_px=int(st.sidebar.selectbox("Min area window (px)", [5, 15, 30, 60], index=1)),
 
-    # Emprise
     kmeans_K=int(st.sidebar.slider("Emprise: K-means K", 6, 14, 8, 1)),
     kmeans_min_area_ratio=float(st.sidebar.slider("Emprise: min area ratio", 0.001, 0.05, 0.01, 0.001)),
     kmeans_smooth_k=int(st.sidebar.selectbox("Emprise: smooth K", [3, 5, 7, 9], index=1)),
     kmeans_work_max=int(st.sidebar.selectbox("Emprise: work_max", [1200, 1600, 2000, 2400], index=2)),
 
-    # Calibration auto
     assumed_door_width_m=float(st.sidebar.selectbox("Calibration auto: largeur porte (m)", [0.73, 0.80, 0.90, 1.00], index=2)),
 
-    # Surfaces
     wall_thickness_m=float(st.sidebar.slider("Murs: épaisseur (m)", 0.10, 0.35, 0.20, 0.01)),
     habitable_perimeter_mode=str(st.sidebar.selectbox("Pourtour habitable", ["total", "external"], index=0)),
+
+    interior_alpha=float(st.sidebar.slider("Visu intérieur: alpha vert", 0.05, 0.60, 0.28, 0.01)),
 )
 
 st.sidebar.markdown(
@@ -725,7 +731,7 @@ with right:
     st.markdown("</div>", unsafe_allow_html=True)
 
 if file is not None:
-    img_pil = Image.open(file)  # pas de convert ici
+    img_pil = Image.open(file)
     base_rgb = ensure_rgb_u8(img_pil)
 
     with left:
@@ -737,25 +743,15 @@ if file is not None:
 
     colA, colB = st.columns([1, 1])
     run = button_in(colA, "🚀 Analyze")
-    download_in(
-        colB,
-        "⬇️ Télécharger l'image input",
-        data=rgb_to_png_bytes(base_rgb),
-        file_name="plan_input.png",
-        mime="image/png",
-    )
+    download_in(colB, "⬇️ Télécharger l'image input", rgb_to_png_bytes(base_rgb), "plan_input.png", "image/png")
 
     if run:
         client = get_client(API_URL, API_KEY)
 
         with st.spinner("Inference (multi-scale)…"):
-            # Pass 1
             rooms_index, legend, m_doors_1, m_wins_1, rows_1, _ = infer_pass(
-                client,
-                params.model_id,
-                img_pil.convert("RGB"),
-                params.pass1_tile,
-                params.pass1_over,
+                client, params.model_id, img_pil.convert("RGB"),
+                params.pass1_tile, params.pass1_over,
                 write_rooms=True,
                 conf_min_door=params.conf_min_door,
                 conf_min_win=params.conf_min_win,
@@ -763,13 +759,9 @@ if file is not None:
             m_doors_1 = clean_mask(m_doors_1, params.min_area_door_px, params.clean_close_k_door)
             m_wins_1 = clean_mask(m_wins_1, params.min_area_win_px, params.clean_close_k_win)
 
-            # Pass 2
             _, _, m_doors_2, m_wins_2, rows_2, _ = infer_pass(
-                client,
-                params.model_id,
-                img_pil.convert("RGB"),
-                params.pass2_tile,
-                params.pass2_over,
+                client, params.model_id, img_pil.convert("RGB"),
+                params.pass2_tile, params.pass2_over,
                 write_rooms=False,
                 conf_min_door=params.conf_min_door,
                 conf_min_win=params.conf_min_win,
@@ -786,7 +778,6 @@ if file is not None:
             df_det = pd.DataFrame(rows_1 + rows_2)
             df_open = df_openings_from_masks(doors, wins, params.min_area_door_px, params.min_area_win_px)
 
-            # Emprise / lots
             mask_units, lots_overlay, df_lots, lots_meta = detect_units_kmeans(
                 base_rgb,
                 K=params.kmeans_K,
@@ -795,7 +786,6 @@ if file is not None:
                 work_max=params.kmeans_work_max,
             )
 
-            # Calibration auto
             m_per_px, scale_meta = estimate_scale_from_doors_using_units(
                 df_open=df_open,
                 mask_units=mask_units,
@@ -807,8 +797,9 @@ if file is not None:
             else:
                 st.session_state.pop("m_per_px", None)
 
-            # Surfaces/pourtours (si calibré)
             surfaces = None
+            interior_green = None
+
             if "m_per_px" in st.session_state and st.session_state["m_per_px"] > 0:
                 surfaces = compute_surfaces_pourtours(
                     mask_units=mask_units,
@@ -816,6 +807,14 @@ if file is not None:
                     wall_thickness_m=params.wall_thickness_m,
                     habitable_perimeter_mode=params.habitable_perimeter_mode,
                 )
+
+                # ✅ IMAGE "Intérieur (vert) = surface habitable approx"
+                if surfaces is not None:
+                    interior_green = overlay_interior_green(
+                        base_rgb=base_rgb,
+                        mask_habitable_u8=surfaces["mask_habitable"],
+                        alpha=params.interior_alpha,
+                    )
 
                 mpp = float(st.session_state["m_per_px"])
                 if not df_open.empty:
@@ -874,6 +873,16 @@ if file is not None:
                 )
                 with st.expander("Voir mask_habitable (debug)"):
                     image_in(st, gray_to_png_bytes(surfaces["mask_habitable"]), caption="mask_habitable")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            # ✅ AJOUT: l'image "Intérieur (vert)"
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.subheader("Intérieur (vert) = surface habitable approx")
+            if interior_green is None:
+                st.info("Image intérieur indisponible (calibration requise).")
+            else:
+                image_in(st, rgb_to_png_bytes(interior_green))
+                download_in(st, "⬇️ interior_green.png", rgb_to_png_bytes(interior_green), "interior_green.png", "image/png")
             st.markdown("</div>", unsafe_allow_html=True)
 
         # ---------------------------
